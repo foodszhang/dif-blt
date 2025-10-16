@@ -3,7 +3,6 @@ import os.path as osp
 import json
 import torch
 import math
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm, trange
 from shutil import copyfile
 import numpy as np
@@ -19,6 +18,7 @@ from .network import get_network
 
 # from .encoder import get_encoder
 from pdb import set_trace as stx
+import logging
 
 
 def gen_log(model_path):
@@ -65,7 +65,6 @@ class Trainer:
         self.epochs = cfg["train"]["epoch"]
         self.i_eval = cfg["log"]["i_eval"]  # epoch for evaluation
         self.i_save = cfg["log"]["i_save"]  # epoch for saving
-        self.netchunk = cfg["render"]["netchunk"]
 
         # Log direcotry，设置实验路径和文件夹
         date_time = str(datetime.datetime.now())
@@ -86,7 +85,7 @@ class Trainer:
             eval 和 train dataset 并不相同
         """
 
-        full_dataset = Dataset(cfg["data_dir"])
+        full_dataset = Dataset(cfg["exp"]["datadir"])
         train_ratio = 0.8
         val_ratio = 0.2
         total_size = len(full_dataset)
@@ -112,7 +111,7 @@ class Trainer:
         # encoder = get_encoder(**cfg["encoder"])
         # stx()
         # self.net = network(encoder, **cfg["network"]).to(device)
-        self.net = get_network("dif")(train_dataset.proj_size, "unet").to(device)
+        self.net = get_network("density")(cfg["proj_size"], "unet").to(device)
         grad_vars = list(self.net.parameters())
 
         # Optimizer，优化器及LR策略
@@ -146,10 +145,6 @@ class Trainer:
             self.optimizer.load_state_dict(ckpt["optimizer"])
             self.global_step = self.epoch_start * len(self.train_dloader)
             self.net.load_state_dict(ckpt["network"])
-
-        # Summary writer 需要用tensorboard打开来看，不如直接就txt文件记录
-        self.writer = SummaryWriter(self.expdir)
-        self.writer.add_text("parameters", self.args2string(cfg), global_step=0)
 
     def args2string(self, hp):
         """
@@ -200,7 +195,7 @@ class Trainer:
             if (
                 (idx_epoch % self.i_eval == 0 or idx_epoch == self.epochs)
                 and self.i_eval > 0
-                #      and idx_epoch > 0
+                and idx_epoch > 0
             ):
                 self.net.eval()  # self.net 和 self.net_fine 分别表示粗细网络
                 with torch.no_grad():
@@ -258,9 +253,6 @@ class Trainer:
                 )  # 此处并没有save best的操作呀
 
             # Update lrate
-            self.writer.add_scalar(
-                "train/lr", self.optimizer.param_groups[0]["lr"], self.global_step
-            )
             # self.logger.info(f"train/lr: {self.optimizer.param_groups[0]["lr"]},{self.global_step}")
             self.lr_scheduler.step()
 

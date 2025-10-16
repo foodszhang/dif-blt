@@ -1,14 +1,29 @@
 exp:
-  expname: unet_denstiry
+  expname: unet_density
   expdir: ./logs/unet/
   datadir: ../mcx_simulation/20251014/
 train:
   epoch: 500
   n_batch: 1
   lrate: 0.001
+  lrf: 0.005
   lrate_gamma: 0.1
   lrate_step: 1500
   resume: False
 log:
   i_eval: 50  # Epoch for evaluation
   i_save: 50  # Epoch for saving
+
+proj_size:
+  d1:
+    - 180
+    - 300
+  d2:
+    - 180
+    - 300
+  d3:
+    - 300
+    - 208
+  d4:
+    - 300
+    - 208

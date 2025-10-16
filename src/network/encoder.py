@@ -4,6 +4,117 @@ import torch.nn.functional as F
 from timm import create_model
 import numpy as np
 from .base import ProjectionConfig
+from src.utils.utils import index_2d
+
+
+class UNetLikeDecoder(nn.Module):
+    """
+    U-Net风格的解码器：将编码器特征图上采样回原始投影图尺寸
+    """
+
+    def __init__(
+        self,
+        encoder_channels: list[int],
+        output_channels: int = 64,
+        output_size: tuple[int, int] | None = None,
+    ):
+        super().__init__()
+        self.encoder_channels = encoder_channels
+        self.output_channels = output_channels
+        self.output_size = output_size
+
+        # 反转编码器通道顺序（从深层到浅层）
+        decoder_channels = encoder_channels[::-1]
+
+        # 上采样块
+        self.up_blocks = nn.ModuleList()
+
+        # 第一个上采样块（没有跳跃连接）
+        self.up_blocks.append(UpBlock(decoder_channels[0], decoder_channels[1] // 2))
+
+        # 后续上采样块（有跳跃连接）
+        for i in range(1, len(decoder_channels) - 1):
+            in_channels = decoder_channels[i] + decoder_channels[i + 1]  # 跳跃连接
+            out_channels = (
+                decoder_channels[i + 1] // 2
+                if i < len(decoder_channels) - 2
+                else output_channels
+            )
+            self.up_blocks.append(UpBlock(in_channels, out_channels))
+
+        # 最终上采样到目标尺寸（如果需要）
+        if output_size is not None:
+            self.final_upsample = nn.Sequential(
+                nn.Upsample(size=output_size, mode="bilinear", align_corners=True),
+                nn.Conv2d(output_channels, output_channels, 3, padding=1),
+                nn.BatchNorm2d(output_channels),
+                nn.ReLU(inplace=True),
+            )
+        else:
+            self.final_upsample = nn.Identity()
+
+    def forward(self, features: list[torch.Tensor]) -> torch.Tensor:
+        """
+        Args:
+            features: 编码器特征列表 [feat1, feat2, feat3, ...] 从浅到深
+        Returns:
+            decoded: 解码后的特征图 [B, C, H, W] 接近原始投影图尺寸
+        """
+        # 反转特征顺序（从深到浅）
+        features = features[::-1]
+
+        x = features[0]  # 最深层特征
+
+        for i, up_block in enumerate(self.up_blocks):
+            if i == 0:
+                # 第一个块没有跳跃连接
+                x = up_block(x)
+                # pass
+            else:
+                # 后续块有跳跃连接
+                skip = features[i]  # 对应层的编码器特征
+
+                x = up_block(x, skip)
+
+        # 最终上采样到目标尺寸
+        x = self.final_upsample(x)
+
+        return x
+
+
+class UpBlock(nn.Module):
+    """上采样块"""
+
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.up = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+        )
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // 2, 3, padding=1),
+            nn.BatchNorm2d(in_channels // 2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // 2, out_channels, 3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(
+        self, x: torch.Tensor, skip: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        x = self.up(x)
+
+        if skip is not None:
+            # 调整skip connection的尺寸（如果需要）
+            if x.shape[-2:] != skip.shape[-2:]:
+                skip = F.interpolate(
+                    skip, size=x.shape[-2:], mode="bilinear", align_corners=True
+                )
+
+            x = torch.cat([x, skip], dim=1)
+
+        x = self.conv(x)
+        return x
 
 
 class BaseEncoder(nn.Module):
@@ -25,7 +136,7 @@ class SwinEncoder(BaseEncoder):
 
     def __init__(
         self,
-        in_channels=1,
+        in_channels: int = 1,
         encoder_name="swin_tiny_patch4_window7_224",
         feature_dims: list[int] | None = None,
     ):
@@ -70,7 +181,7 @@ class SwinEncoder(BaseEncoder):
 class UNetEncoder(BaseEncoder):
     """原始U-Net编码器"""
 
-    def __init__(self, in_channels=1, feature_dims: List[int] = None):
+    def __init__(self, in_channels=1, feature_dims: list[int] | None = None):
         super().__init__(in_channels, feature_dims)
 
         if feature_dims is None:
@@ -125,12 +236,11 @@ class MultiViewProjectionEncoder(nn.Module):
         config: ProjectionConfig,
         encoder_type: str = "swin",
         feature_dims: list[int] | None = None,
-        unified_size: tuple[int, int] = (64, 64),
+        decoded_feature_dim: int = 32,
     ):
         super().__init__()
         self.config = config
         self.encoder_type = encoder_type
-        self.unified_size = unified_size
 
         if feature_dims is None:
             if encoder_type == "swin":
@@ -142,8 +252,11 @@ class MultiViewProjectionEncoder(nn.Module):
 
         # 为每个投影面创建独立的编码器
         self.view_encoders = nn.ModuleDict()
+        self.view_decoders = nn.ModuleDict()
+        self.view_feature_maps = nn.ModuleDict()
 
-        for view_name in config.views:
+        for view_name, original_size in config.projection_sizes.items():
+            # 编码器
             if encoder_type == "swin":
                 encoder = SwinEncoder(
                     in_channels=config.projection_channels, feature_dims=feature_dims
@@ -154,56 +267,49 @@ class MultiViewProjectionEncoder(nn.Module):
                 )
             self.view_encoders[view_name] = encoder
 
-        # 多尺度特征采样器（用于点采样回归）
-        self.multiscale_sampler = MultiScaleFeatureSampler(feature_dims)
+            # 解码器（还原到原始投影图尺寸）
+            decoder = UNetLikeDecoder(
+                encoder_channels=encoder.encoder_channels,
+                output_channels=decoded_feature_dim,
+                output_size=original_size,  # 还原到原始尺寸
+            )
+            self.view_decoders[view_name] = decoder
 
-        # 自适应池化层
-        self.adaptive_pools = nn.ModuleList(
-            [nn.AdaptiveAvgPool2d(unified_size) for _ in range(len(feature_dims))]
-        )
+            # 最终特征映射（可选，进一步提炼特征）
+            self.view_feature_maps[view_name] = nn.Sequential(
+                nn.Conv2d(decoded_feature_dim, decoded_feature_dim, 3, padding=1),
+                nn.BatchNorm2d(decoded_feature_dim),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(decoded_feature_dim, decoded_feature_dim, 1),
+            )
+            self.decoded_feature_dim = decoded_feature_dim
 
-        # 特征融合卷积（用于跨视图融合）
-        self.fusion_convs = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Conv2d(dim, 64, 3, padding=1),
-                    nn.BatchNorm2d(64),
-                    nn.ReLU(inplace=True),
-                )
-                for dim in feature_dims
-            ]
-        )
-
-        self.multiscale_feature_dim = 64 * len(feature_dims)
-
-    def forward(self, projections: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """返回多尺度融合特征和每个视图的原始多尺度特征"""
-        multi_scale_features = []  # 用于跨视图融合
-        view_multi_scale_features = {}  # 用于点采样回归
+    def forward(
+        self, projections: dict[str, torch.Tensor]
+    ) -> dict[str, dict[str, torch.Tensor]]:
+        """返回解码到原始尺寸的特征图"""
+        decoded_features = {}
+        encoder_features_dict = {}
 
         # 处理每个投影面
         for view_name, proj_tensor in projections.items():
-            encoder = self.view_encoders[view_name]
+            # 编码
+            # 加通道
+            proj_tensor = proj_tensor.unsqueeze(1)
+            encoder_features = self.view_encoders[view_name](proj_tensor)
+            encoder_features_dict[view_name] = encoder_features
 
-            # 获取原始多尺度特征（用于点采样）
-            raw_multi_scale = encoder(proj_tensor)
-            view_multi_scale_features[view_name] = raw_multi_scale
+            # 解码回原始尺寸
+            decoded_feature = self.view_decoders[view_name](encoder_features)
 
-            # 多尺度特征融合（用于跨视图融合）
-            view_features = []
-            for i, (feat, pool, conv) in enumerate(
-                zip(raw_multi_scale, self.adaptive_pools, self.fusion_convs)
-            ):
-                pooled_feat = pool(feat)
-                fused_feat = conv(pooled_feat)
-                view_features.append(fused_feat)
-
-            view_multiscale = torch.cat(view_features, dim=1)
-            multi_scale_features.append(view_multiscale)
+            # 最终特征映射
+            # final_feature = self.view_feature_maps[view_name](decoded_feature)
+            # decoded_features[view_name] = final_feature
+            decoded_features[view_name] = decoded_feature
 
         return {
-            "multiscale_features": multi_scale_features,  # 用于CrossViewFusion
-            "view_multi_scale_features": view_multi_scale_features,  # 用于PointSamplingDecoder
+            "features": decoded_features,  # 原始尺寸的特征图
+            "encoder_features": encoder_features_dict,  # 编码器中间特征（可选）
         }
 
 
@@ -212,248 +318,59 @@ class PointFeatureSampler(nn.Module):
     点特征采样器：从各个视图的特征图中采样点特征
     """
 
-    def __init__(self, feature_dims: List[int], output_dims: List[int] = None):
+    def __init__(self):
         super().__init__()
-        self.feature_dims = feature_dims
-        self.num_scales = len(feature_dims)
-
-        # 设置每个尺度的输出维度
-        if output_dims is None:
-            self.output_dims = [max(8, dim // 8) for dim in feature_dims]
-        else:
-            self.output_dims = output_dims
-
-        # 多尺度特征变换
-        self.scale_transforms = nn.ModuleList()
-        for i, (in_dim, out_dim) in enumerate(zip(feature_dims, self.output_dims)):
-            if in_dim != out_dim:
-                transform = nn.Sequential(
-                    nn.Conv2d(in_dim, out_dim, 1),  # 1x1卷积降维
-                    nn.BatchNorm2d(out_dim),
-                    nn.ReLU(inplace=True),
-                )
-            else:
-                transform = nn.Identity()
-            self.scale_transforms.append(transform)
-
-        # 计算总特征维度
-        self.total_output_dim = sum(self.output_dims)
 
     def sample_view_features(
         self,
-        multi_scale_features: List[torch.Tensor],
+        features: torch.Tensor,
         points: torch.Tensor,
         view_name: str,
-        original_size: Tuple[int, int],
-    ) -> torch.Tensor:
-        """
-        从单个视图的多尺度特征图中采样点特征
-        """
-        batch_size, num_points, _ = points.shape
-        device = points.device
-
+    ):
         # 存储所有尺度的点特征
-        scale_point_features = []
+        # scale_point_features = []
 
-        for scale_idx, (features, transform) in enumerate(
-            zip(multi_scale_features, self.scale_transforms)
-        ):
-            # 变换特征图
-            transformed_features = transform(features)  # [B, C_out, H, W]
-            _, feat_dim, feat_h, feat_w = transformed_features.shape
+        # 变换特征图
+        # 将3D点投影到当前视图
+        proj_coords = self.project_points_to_view(points, view_name)
 
-            # 将3D点投影到当前视图
-            proj_coords = self.project_points_to_view(
-                points, view_name, original_size, (feat_h, feat_w)
-            )
+        # print("66666", proj_coords.shape)
 
-            # 双线性插值采样特征
-            point_feat = (
-                F.grid_sample(
-                    transformed_features,
-                    proj_coords.unsqueeze(2).unsqueeze(2),
-                    mode="bilinear",
-                    align_corners=True,
-                    padding_mode="border",
-                )
-                .squeeze(-1)
-                .squeeze(-1)
-            )  # [B, C, N]
+        # 双线性插值采样特征
+        point_feat = index_2d(features, proj_coords)  # B C N
 
-            point_feat = point_feat.transpose(1, 2)  # [B, N, C]
-            scale_point_features.append(point_feat)
+        point_feat = point_feat.transpose(1, 2)  # [B, N, C]
+        # scale_point_features.append(point_feat)
 
         # 拼接所有尺度的特征
-        view_point_features = torch.cat(
-            scale_point_features, dim=-1
-        )  # [B, N, total_output_dim]
+        # view_point_features = torch.cat(
+        # scale_point_features, dim=-1
+        # )  # [B, N, total_output_dim]
 
-        return view_point_features
+        return point_feat
 
     def project_points_to_view(
         self,
         points: torch.Tensor,
         view_name: str,
-        original_size: Tuple[int, int],
-        feature_size: Tuple[int, int],
     ):
         """将3D点投影到2D视图坐标"""
-        batch_size, num_points, _ = points.shape
-        orig_h, orig_w = original_size
-        feat_h, feat_w = feature_size
 
         # 根据视图名称选择投影方式
         if view_name == "d1":
-            proj_coords = points[:, :, :2]  # [B, N, 2]
+            proj_coords = points[:, :, :2].clone()  # [B, N, 2]
         elif view_name == "d2":
-            proj_coords = points[:, :, :2]  # [B, N, 2]
+            proj_coords = points[:, :, :2].clone()  # [B, N, 2]
         elif view_name == "d3":
-            proj_coords = points[:, :, 1:]  # [B, N, 2]
+            proj_coords = points[:, :, 1:].clone()  # [B, N, 2]
         elif view_name == "d4":
-            proj_coords = points[:, :, 1:]  # [B, N, 2]
+            proj_coords = points[:, :, 1:].clone()  # [B, N, 2]
         else:
             raise ValueError(f"Unknown view name: {view_name}")
 
         # 坐标转换
-        proj_coords[:, :, 0] = proj_coords[:, :, 0] * (feat_w - 1)
-        proj_coords[:, :, 1] = proj_coords[:, :, 1] * (feat_h - 1)
 
-        proj_coords[:, :, 0] = 2.0 * proj_coords[:, :, 0] / (feat_w - 1) - 1.0
-        proj_coords[:, :, 1] = 2.0 * proj_coords[:, :, 1] / (feat_h - 1) - 1.0
+        proj_coords[:, :, 0] = 2.0 * proj_coords[:, :, 0] - 1.0
+        proj_coords[:, :, 1] = 2.0 * proj_coords[:, :, 1] - 1.0
 
         return proj_coords
-
-
-class MultiScaleFeatureSampler(nn.Module):
-    """
-    多尺度特征采样器：从所有尺度特征图中采样点特征
-    """
-
-    def __init__(self, feature_dims: list[int], output_dims: list[int] | None = None):
-        super().__init__()
-        self.feature_dims = feature_dims
-        self.num_scales = len(feature_dims)
-
-        # 设置每个尺度的输出维度
-        if output_dims is None:
-            # 默认：为每个尺度设置不同的输出维度，浅层特征分配更多通道
-            self.output_dims = [max(16, dim // 4) for dim in feature_dims]
-            # 调整使得浅层特征有更多表达能力
-            self.output_dims[0] = max(32, self.output_dims[0])  # 最浅层
-            self.output_dims[1] = max(24, self.output_dims[1])  # 次浅层
-        else:
-            self.output_dims = output_dims
-
-        # 为每个尺度创建特征变换网络
-        self.scale_transforms = nn.ModuleList()
-        for i, (in_dim, out_dim) in enumerate(zip(feature_dims, self.output_dims)):
-            if in_dim != out_dim:
-                transform = nn.Sequential(
-                    nn.Conv2d(in_dim, out_dim, 3, padding=1),
-                    nn.BatchNorm2d(out_dim),
-                    nn.ReLU(inplace=True),
-                    nn.Conv2d(out_dim, out_dim, 1),  # 最终投影
-                )
-            else:
-                transform = nn.Identity()
-            self.scale_transforms.append(transform)
-
-        # 计算总特征维度
-        self.total_output_dim = sum(self.output_dims)
-
-    def project_points_to_view(
-        self,
-        points: torch.Tensor,
-        view_name: str,
-        original_size: tuple[int, int],
-        feature_size: tuple[int, int],
-    ):
-        """
-        将3D点投影到2D视图坐标
-        points: [B, N, 3] 在[0,1]范围内
-        return: [B, N, 2] 在[-1,1]范围内的网格采样坐标
-        """
-        batch_size, num_points, _ = points.shape
-
-        # 根据视图名称选择投影方式
-        if view_name == "d1":
-            proj_coords = points[:, :, :2]  # [B, N, 2]
-        elif view_name == "d2":
-            proj_coords = points[:, :, :2]  # [B, N, 2]
-        elif view_name == "d3":
-            proj_coords = points[:, :, 1:]  # [B, N, 2]
-        elif view_name == "d4":
-            proj_coords = points[:, :, 1:]  # [B, N, 2]
-        else:
-            raise ValueError(f"Unknown view name: {view_name}")
-
-        # 从[0,1]坐标转换到特征图坐标
-        orig_h, orig_w = original_size
-        feat_h, feat_w = feature_size
-
-        # 缩放坐标到特征图尺寸
-        proj_coords[:, :, 0] = proj_coords[:, :, 0] * (feat_w - 1)
-        proj_coords[:, :, 1] = proj_coords[:, :, 1] * (feat_h - 1)
-
-        # 转换到[-1,1]范围 (grid_sample要求的范围)
-        proj_coords[:, :, 0] = 2.0 * proj_coords[:, :, 0] / (feat_w - 1) - 1.0
-        proj_coords[:, :, 1] = 2.0 * proj_coords[:, :, 1] / (feat_h - 1) - 1.0
-
-        return proj_coords
-
-    def sample_features(
-        self,
-        multi_scale_features: List[torch.Tensor],
-        points: torch.Tensor,
-        projection_sizes: Dict[str, Tuple[int, int]],
-    ) -> Dict[str, torch.Tensor]:
-        """
-        从多尺度特征图中采样点特征
-
-        Args:
-            multi_scale_features: 每个尺度的特征图列表
-            points: [B, N, 3] 3D点坐标
-            projection_sizes: 各视图的原始尺寸
-
-        Returns:
-            scale_point_features: 每个尺度的点特征字典
-        """
-        batch_size, num_points, _ = points.shape
-        scale_point_features = {}
-
-        for scale_idx, (features, transform) in enumerate(
-            zip(multi_scale_features, self.scale_transforms)
-        ):
-            # 变换特征图
-            transformed_features = transform(features)  # [B, C_out, H, W]
-            _, feat_dim, feat_h, feat_w = transformed_features.shape
-
-            # 存储所有视图在当前尺度的特征
-            scale_features = []
-
-            for view_name, original_size in projection_sizes.items():
-                # 将3D点投影到当前视图
-                proj_coords = self.project_points_to_view(
-                    points, view_name, original_size, (feat_h, feat_w)
-                )
-
-                # 双线性插值采样特征
-                point_feat = (
-                    F.grid_sample(
-                        transformed_features,
-                        proj_coords.unsqueeze(2).unsqueeze(2),
-                        mode="bilinear",
-                        align_corners=True,
-                    )
-                    .squeeze(-1)
-                    .squeeze(-1)
-                )  # [B, C, N]
-
-                point_feat = point_feat.transpose(1, 2)  # [B, N, C]
-                scale_features.append(point_feat)
-
-            # 拼接所有视图在当前尺度的特征
-            scale_combined = torch.cat(scale_features, dim=-1)  # [B, N, V * C_out]
-            scale_point_features[f"scale_{scale_idx}"] = scale_combined
-
-        return scale_point_features

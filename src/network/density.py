@@ -2,15 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .base import ProjectionConfig
-from .encoder import MultiViewProjectionEncoder, PointFeatureSampler, , PointFeatureSampler
-from .fusion import PointWiseCrossViewFusion
-from src.encoder import get_encoder
+from .encoder import MultiViewProjectionEncoder, PointFeatureSampler
+from src.encoder.hash_encoder import HashEncoder
 
 
-class PointWiseFusionDensityNet(nn.Module):
+class PointDensityNet(nn.Module):
     """
     点级别融合的密度网络：
-    多视图编码 → 各视图点特征采样 → 点级别跨视图融合 → 3D密度回归
+    多视图编码 → 各视图点特征采样 → 拼接各个视图的点特征 → 3D密度回归
     """
 
     def __init__(
@@ -19,7 +18,6 @@ class PointWiseFusionDensityNet(nn.Module):
         encoder_type: str = "swin",
         feature_dims: list[int] | None = None,
         point_feature_dim: int = 32,
-        fused_feature_dim: int = 256,
     ):
         super().__init__()
 
@@ -32,21 +30,17 @@ class PointWiseFusionDensityNet(nn.Module):
         )
 
         # 2. 点特征采样器
-        self.point_feature_sampler = PointFeatureSampler(feature_dims)
+        self.point_feature_sampler = PointFeatureSampler()
 
-        # 3. 点级别跨视图融合
-        self.point_fusion = PointWiseCrossViewFusion(
-            num_views=len(self.config.views),
-            point_feature_dim=self.point_feature_sampler.total_output_dim,
-            fused_feature_dim=fused_feature_dim,
-        )
-
-        # 4. Instant NGP 哈希编码器
+        # 3. Instant NGP 哈希编码器
         # self.hash_encoder = HashEncodingWrapper(**default_hash_config)
-        self.hash_encoder = get_encoder("hashgrid")
+        self.hash_encoder = HashEncoder()
 
-        # 5. 密度回归MLP
-        mlp_input_dim = self.hash_encoder.output_dim + fused_feature_dim
+        # 4. 密度回归MLP
+        mlp_input_dim = (
+            self.hash_encoder.output_dim
+            + self.projection_encoder.decoded_feature_dim * len(self.config.views)
+        )
         self.density_mlp = nn.Sequential(
             nn.Linear(mlp_input_dim, 512),
             nn.ReLU(inplace=True),
@@ -62,21 +56,20 @@ class PointWiseFusionDensityNet(nn.Module):
             nn.Sigmoid(),
         )
 
-        print(f"PointWiseFusionDensityNet:")
+        print(f"PointDensityNet:")
         print(f"  Number of views: {len(self.config.views)}")
         print(
-            f"  Point feature dim per view: {self.point_feature_sampler.total_output_dim}"
+            f"  feature dim: {self.projection_encoder.decoded_feature_dim * len(self.config.views)}"
         )
-        print(f"  Fused feature dim: {fused_feature_dim}")
         print(f"  Hash encoding dim: {self.hash_encoder.output_dim}")
         print(f"  MLP input dim: {mlp_input_dim}")
 
     def forward(
         self,
         projections: dict[str, torch.Tensor],
-        points: torch.Tensor | None = None,
+        points: torch.Tensor,
         return_point_features: bool = False,
-    ) -> torch.Tensor:
+    ):
         """
         Args:
             projections: 多视图投影图像
@@ -88,55 +81,49 @@ class PointWiseFusionDensityNet(nn.Module):
         # 1. 编码多视图投影
         encoder_output = self.projection_encoder(projections)
 
-        # 2. 生成采样点（如果未提供）
-        if points is None:
-            points = self._generate_sampling_points(batch_size)
-
-        # 3. 在各个视图上采样点特征
+        # 2. 在各个视图上采样点特征
         view_point_features = {}
+        total_features = []
         for view_name in self.config.views:
-            # 获取该视图的多尺度特征
-            view_multi_scale = encoder_output["view_multi_scale_features"][view_name]
+            # 获取该视图的多尺度特征图
+            view_proj_feature_map = encoder_output["features"][view_name]
 
             # 采样该视图的点特征
             point_features = self.point_feature_sampler.sample_view_features(
-                view_multi_scale,
+                view_proj_feature_map,
                 points,
                 view_name,
-                self.config.projection_sizes[view_name],
             )
             view_point_features[view_name] = point_features
+            total_features.append(point_features)
 
         # 4. 点级别跨视图融合
-        fused_point_features = self.point_fusion(view_point_features, points)
+        # fused_point_features = self.point_fusion(view_point_features, points)
 
         # 5. 哈希编码3D坐标
-        hash_features = self.hash_encoder(points)
+        hash_points = points.reshape(-1, 3)
+
+        hash_features = self.hash_encoder(hash_points)
+        hash_features = hash_features.reshape(
+            batch_size, -1, self.hash_encoder.output_dim
+        )
+        total_point_features = torch.cat(total_features, dim=-1)
 
         # 6. 拼接特征并回归密度
-        combined_features = torch.cat([hash_features, fused_point_features], dim=-1)
+        combined_features = torch.cat([hash_features, total_point_features], dim=-1)
         densities = self.density_mlp(combined_features)
 
         if return_point_features:
             return densities, {
-                "view_point_features": view_point_features,
-                "fused_point_features": fused_point_features,
+                "point_features": total_point_features,
                 "hash_features": hash_features,
             }
         else:
             return densities
 
-    def _generate_sampling_points(
-        self, batch_size: int, num_points: int = 10000
-    ) -> torch.Tensor:
-        """生成采样点"""
-        device = next(iter(self.parameters())).device
-        points = torch.rand(batch_size, num_points, 3, device=device)
-        return points
-
     def get_density_at_points(
         self, projections: dict[str, torch.Tensor], points: torch.Tensor
-    ) -> torch.Tensor:
+    ):
         """在指定点查询密度值"""
         return self.forward(projections, points)
 
