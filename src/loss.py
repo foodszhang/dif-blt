@@ -69,7 +69,9 @@ def calc_tv_2d_loss(loss, x, k):
     return loss
 
 
-def compute_tv_norm(values, losstype="l2", weighting=None):  # pylint: disable=g-doc-args
+def compute_tv_norm(
+    values, losstype="l2", weighting=None
+):  # pylint: disable=g-doc-args
     """Returns TV norm for input values.
 
     Note: The weighting / masking term was necessary to avoid degenerate
@@ -96,221 +98,73 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class DiceLoss(nn.Module):
-    """Dice Loss for 3D density field segmentation"""
+class SparseLightLoss(nn.Module):
+    """针对稀疏光源的损失函数（抑制背景，增强光源区域权重）"""
 
-    def __init__(self, smooth=1e-6, gamma=1.0, weight=None):
+    def __init__(self, pos_weight=150.0, sparse_weight=0.01, attn_weight=0.1):
         super().__init__()
-        self.smooth = smooth
-        self.gamma = gamma  # 用于调整难易样本权重
-        self.weight = weight  # 类别权重
+        self.pos_weight = pos_weight  # 正样本（光源）权重
+        self.sparse_weight = sparse_weight  # 稀疏性约束权重
+        self.attn_weight = attn_weight  # 注意力约束权重
 
-    def forward(self, prediction, target):
+    # def forward(self, pred_density, gt_density, attn_weights):
+    def forward(self, pred_density, gt_density):
         """
-        prediction: (B, C, D, H, W) 或 (B, C, H, W) 或 (B, C, N)
-        target: (B, D, H, W) 或 (B, H, W) 或 (B, N)
+        pred_density: [B, N, 1] 预测密度
+        gt_density: [B, N, 1] 真实密度（0=背景，1=光源）
+        attn_weights: [B, N, num_views] 注意力权重
         """
-        # 确保预测是概率
-        if prediction.shape[1] > 1:
-            # 多分类情况
-            prediction = F.softmax(prediction, dim=1)
-        else:
-            # 二分类情况
-            prediction = torch.sigmoid(prediction)
+        # 1. 加权二元交叉熵（提升光源区域损失权重）
+        bce_loss = F.binary_cross_entropy(
+            pred_density,
+            gt_density,
+            weight=gt_density * (self.pos_weight - 1)
+            + 1,  # 正样本权重=pos_weight，负样本=1
+        )
 
-        # 处理不同的输入维度
-        if prediction.dim() == 5:  # 3D volume
-            B, C, D, H, W = prediction.shape
-            prediction = prediction.view(B, C, -1)
-            target = target.view(B, -1)
-        elif prediction.dim() == 4:  # 2D feature
-            B, C, H, W = prediction.shape
-            prediction = prediction.view(B, C, -1)
-            target = target.view(B, -1)
-        elif prediction.dim() == 3:  # Point cloud
-            B, C, N = prediction.shape
-            prediction = prediction.view(B, C, -1)
-            target = target.view(B, -1)
+        # 2. L1稀疏性约束（抑制背景区域的预测值）
+        sparse_loss = self.sparse_weight * torch.mean(torch.abs(pred_density))
 
-        # 计算Dice系数
-        if prediction.shape[1] == 1:
-            # 二分类
-            intersection = (prediction * target.unsqueeze(1)).sum(dim=2)
-            union = prediction.sum(dim=2) + target.sum(dim=1) + self.smooth
-            dice = (2.0 * intersection + self.smooth) / union
+        # 3. 注意力熵约束（光源点的注意力应更集中，熵更小）
+        # attn_entropy_loss = 0.0
+        # light_mask = (gt_density > 0.5).squeeze(-1)  # [B, N]，光源点掩码
+        # if light_mask.sum() > 0:
+        #     # 仅对光源点计算注意力熵
+        #     light_attn = attn_weights[light_mask]  # [K, num_views]，K为光源点数量
+        #     entropy = -torch.sum(
+        #         light_attn * torch.log(light_attn + 1e-8), dim=1
+        #     ).mean()
+        #     attn_entropy_loss = self.attn_weight * entropy
 
-        else:
-            # 多分类
-            dice = 0
-            num_classes = prediction.shape[1]
-            for cls in range(num_classes):
-                pred_cls = prediction[:, cls, :]
-                target_cls = (target == cls).float()
-
-                intersection = (pred_cls * target_cls).sum(dim=1)
-                union = pred_cls.sum(dim=1) + target_cls.sum(dim=1) + self.smooth
-
-                if self.weight is not None:
-                    class_weight = self.weight[cls]
-                else:
-                    class_weight = 1.0
-
-                dice += class_weight * (2.0 * intersection + self.smooth) / union
-
-            dice /= num_classes
-
-        # 应用gamma调整（关注难样本）
-        dice = torch.pow(dice, self.gamma)
-
-        return 1 - dice.mean()
+        # total_loss = bce_loss + sparse_loss + attn_entropy_loss
+        total_loss = bce_loss + sparse_loss
+        # total_loss = bce_loss
+        return total_loss
 
 
-class CombinedLoss(nn.Module):
-    """组合损失函数：Dice Loss + Focal Loss + 权重平衡"""
+def dice_coefficient(pred, target, threshold=0.5, eps=1e-8):
+    """
+    计算三维体素二分类的Dice系数
 
-    def __init__(self, alpha=0.7, beta=0.3, gamma=2.0, class_weights=None):
-        super().__init__()
-        self.alpha = alpha  # Dice Loss权重
-        self.beta = beta  # Focal Loss权重
+    参数:
+        pred: 模型输出的预测值，shape为(B, D, H, W)，通常是sigmoid后的概率值
+        target: 真实标签，shape为(B, D, H, W)，值为0或1
+        threshold: 二值化阈值，默认0.5
+        eps: 防止分母为0的微小值
 
-        self.dice_loss = DiceLoss(gamma=1.0, weight=class_weights)
-        self.focal_loss = FocalLoss(gamma=gamma, weight=class_weights)
+    返回:
+        批次的平均Dice系数（ scalar ）
+    """
+    # 1. 预测值二值化（二分类）
+    pred_bin = (pred >= threshold).float()  # 转换为0/1的float类型
 
-    def forward(self, prediction, target):
-        dice = self.dice_loss(prediction, target)
-        # focal = self.focal_loss(prediction, target)
+    # 2. 计算交（intersection）和并（union的分子部分）
+    intersection = (pred_bin * target).sum(
+        dim=(1, 2, 3)
+    )  # 对D、H、W维度求和，保留批次维度(B,)
+    pred_sum = pred_bin.sum(dim=(1, 2, 3))  # 预测正类总和 (B,)
+    target_sum = target.sum(dim=(1, 2, 3))  # 真实正类总和 (B,)
 
-        # return self.alpha * dice + self.beta * focal
-        return self.alpha * dice
-
-
-class FocalLoss(nn.Module):
-    """Focal Loss for addressing class imbalance"""
-
-    def __init__(self, gamma=2.0, weight=None, reduction="mean"):
-        super().__init__()
-        self.gamma = gamma
-        self.weight = weight
-        self.reduction = reduction
-
-    def forward(self, prediction, target):
-        if prediction.shape[1] == 1:
-            # 二分类
-            ce_loss = F.binary_cross_entropy_with_logits(
-                prediction.squeeze(1),
-                target.float(),
-                weight=self.weight,
-                reduction="none",
-            )
-            pt = torch.exp(-ce_loss)
-            focal_loss = ((1 - pt) ** self.gamma) * ce_loss
-        else:
-            # 多分类
-            ce_loss = F.cross_entropy(
-                prediction, target.long(), weight=self.weight, reduction="none"
-            )
-            pt = torch.exp(-ce_loss)
-            focal_loss = ((1 - pt) ** self.gamma) * ce_loss
-
-        if self.reduction == "mean":
-            return focal_loss.mean()
-        elif self.reduction == "sum":
-            return focal_loss.sum()
-        else:
-            return focal_loss
-
-
-class_weights = torch.tensor([0.1, 0.9])  # [光源, 背景]
-combined_loss = CombinedLoss(
-    alpha=0.7,  # Dice Loss权重
-    beta=0.3,  # Focal Loss权重
-    gamma=2.0,  # Focal Loss的gamma
-    class_weights=class_weights,
-)
-
-
-# 训练示例
-def train_light_source_segmentation():
-    # 网络和损失函数
-    model = LightSourceSegmentationNetwork(feature_dim=256, num_classes=2)
-
-    # 计算类别权重（根据您的数据分布调整）
-    # 假设光源占比约1%，背景占比99%
-
-    # 组合损失函数
-    criterion = CombinedLoss(
-        alpha=0.7,  # Dice Loss权重
-        beta=0.3,  # Focal Loss权重
-        gamma=2.0,  # Focal Loss的gamma
-        class_weights=class_weights,
-    )
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-
-    # 训练循环
-    for epoch in range(num_epochs):
-        for batch_idx, (
-            points_3d,
-            view_features,
-            projection_matrices,
-            targets,
-        ) in enumerate(train_loader):
-            optimizer.zero_grad()
-
-            # 前向传播
-            seg_logits, attention_weights = model(
-                points_3d, view_features, projection_matrices
-            )
-
-            # 计算损失
-            loss = criterion(seg_logits, targets)
-
-            # 反向传播
-            loss.backward()
-            optimizer.step()
-
-            # 记录和打印
-            if batch_idx % 100 == 0:
-                print(f"Epoch: {epoch}, Batch: {batch_idx}, Loss: {loss.item():.4f}")
-
-
-# 评估指标
-class SegmentationMetrics:
-    """分割评估指标"""
-
-    def __init__(self, num_classes=2):
-        self.num_classes = num_classes
-
-    def compute_iou(self, prediction, target):
-        """计算IoU"""
-        prediction = torch.argmax(prediction, dim=1)
-        ious = []
-
-        for cls in range(self.num_classes):
-            pred_cls = prediction == cls
-            target_cls = target == cls
-
-            intersection = (pred_cls & target_cls).float().sum()
-            union = (pred_cls | target_cls).float().sum()
-
-            iou = (intersection + 1e-6) / (union + 1e-6)
-            ious.append(iou.item())
-
-        return ious
-
-    def compute_dice(self, prediction, target):
-        """计算Dice系数"""
-        prediction = torch.argmax(prediction, dim=1)
-        dices = []
-
-        for cls in range(self.num_classes):
-            pred_cls = prediction == cls
-            target_cls = target == cls
-
-            intersection = (pred_cls & target_cls).float().sum()
-            dice = (2.0 * intersection + 1e-6) / (
-                pred_cls.float().sum() + target_cls.float().sum() + 1e-6
-            )
-            dices.append(dice.item())
-
-        return dices
+    # 3. 计算每个样本的Dice系数，再求批次平均
+    dice_per_sample = (2.0 * intersection + eps) / (pred_sum + target_sum + eps)
+    return dice_per_sample.mean()  # 返回批次平均Dice

@@ -7,6 +7,7 @@ from tqdm import tqdm, trange
 from shutil import copyfile
 import numpy as np
 from torch.utils.data import DataLoader, random_split
+from torch.amp import autocast, GradScaler
 
 # from .dataset import MultiProjDataset as Dataset
 from .dataset.proj_dataset import MultiProjDataset as Dataset
@@ -70,10 +71,15 @@ class Trainer:
         date_time = str(datetime.datetime.now())
         date_time = time2file_name(date_time)
         self.expdir = osp.join(cfg["exp"]["expdir"], cfg["exp"]["expname"], date_time)
+        # self.expdir = osp.join(
+        #     cfg["exp"]["expdir"], cfg["exp"]["expname"], "2025_10_20_22_56_48"
+        # )
         self.ckptdir = osp.join(self.expdir, "ckpt.tar")
         self.ckptdir_backup = osp.join(self.expdir, "ckpt_backup.tar")
         self.ckpt_best_dir = osp.join(self.expdir, "ckpt_best.tar")
         self.best_ssim_3d = 0
+        self.best_loss = 999
+        self.best_dice = 0
         self.evaldir = osp.join(self.expdir, "eval")
         os.makedirs(self.evaldir, exist_ok=True)
         self.logger = gen_log(self.expdir)
@@ -85,23 +91,30 @@ class Trainer:
             eval 和 train dataset 并不相同
         """
 
-        full_dataset = Dataset(cfg["exp"]["datadir"])
-        train_ratio = 0.8
-        val_ratio = 0.2
-        total_size = len(full_dataset)
+        train_dataset = Dataset(cfg["exp"]["datadir"], cfg["exp"]["blockdir"])
+        val_dataset = Dataset(
+            cfg["exp"]["valdir"], cfg["exp"]["blockdir"], is_training=False
+        )
+        # total_size = len(full_dataset)
 
-        train_size = int(train_ratio * total_size)
-        val_size = total_size - train_size
+        # train_size = int(train_ratio * total_size)
+        # val_size = total_size - train_size
 
         # 4. 随机切分
-        train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+        # train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
 
         # stx()
         self.train_dloader = DataLoader(
-            train_dataset, batch_size=1, shuffle=True, num_workers=0
+            train_dataset,
+            batch_size=4,
+            # shuffle=True,
+            shuffle=False,
+            num_workers=4,
+            persistent_workers=True,
+            prefetch_factor=2,
         )
         self.eval_dloader = DataLoader(
-            val_dataset, batch_size=1, shuffle=False, num_workers=0
+            val_dataset, batch_size=2, shuffle=False, num_workers=0
         )
 
         # train_dataset, val_dataset = torch.utils.data.random_split(dataset, [110, 21])
@@ -111,7 +124,7 @@ class Trainer:
         # encoder = get_encoder(**cfg["encoder"])
         # stx()
         # self.net = network(encoder, **cfg["network"]).to(device)
-        self.net = get_network("density")(cfg["proj_size"], "unet").to(device)
+        self.net = get_network("density", 7).to(device)
         grad_vars = list(self.net.parameters())
 
         # Optimizer，优化器及LR策略
@@ -135,7 +148,7 @@ class Trainer:
         self.lr_scheduler = lr_scheduler.LambdaLR(
             self.optimizer, lr_lambda=self.lr_func
         )
-
+        self.scaler = GradScaler("cuda")
         # Load checkpoints
         self.epoch_start = 0
         if cfg["train"]["resume"] and osp.exists(self.ckptdir):
@@ -195,7 +208,7 @@ class Trainer:
             if (
                 (idx_epoch % self.i_eval == 0 or idx_epoch == self.epochs)
                 and self.i_eval > 0
-                and idx_epoch > 0
+                # and idx_epoch > 0
             ):
                 self.net.eval()  # self.net 和 self.net_fine 分别表示粗细网络
                 with torch.no_grad():
@@ -264,6 +277,9 @@ class Trainer:
         """
         self.optimizer.zero_grad()
         loss = self.compute_loss(data, global_step, idx_epoch)
+        # self.scaler.scale(loss).backward()
+        # self.scaler.step(self.optimizer)
+        # self.scaler.update()
         loss.backward()
         self.optimizer.step()
         return loss.item()

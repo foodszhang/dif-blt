@@ -1,29 +1,23 @@
 exp:
   expname: unet_density
   expdir: ./logs/unet/
-  datadir: ../mcx_simulation/20251014/
+  datadir: ../mcx_simulation/one_source_train
+  # datadir: ../mcx_simulation/20251027/
+  #valdir: ../mcx_simulation/only_for_test/
+  valdir: ../mcx_simulation/one_source_val
+  #datadir: ../mcx_simulation/20251021/
+  #datadir: ../mcx_simulation/only_for_test/
+  blockdir: ../mcx_simulation/preprocessed_blocks/
 train:
-  epoch: 500
+  epoch: 2000
   n_batch: 1
-  lrate: 0.001
+  lrate: 0.01
   lrf: 0.005
   lrate_gamma: 0.1
   lrate_step: 1500
-  resume: False
+  resume: True
+network:
+  num_view: 7
 log:
-  i_eval: 50  # Epoch for evaluation
-  i_save: 50  # Epoch for saving
-
-proj_size:
-  d1:
-    - 180
-    - 300
-  d2:
-    - 180
-    - 300
-  d3:
-    - 300
-    - 208
-  d4:
-    - 300
-    - 208
+  i_eval: 100  # Epoch for evaluation
+  i_save: 100  # Epoch for saving

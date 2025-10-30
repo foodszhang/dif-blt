@@ -1,8 +1,8 @@
 from .density import PointDensityNet
 
 
-def get_network(name):
+def get_network(name, num_view=4):
     if name == "density":
-        return PointDensityNet
+        return PointDensityNet(num_view)
     else:
         raise Exception("Unsupport Network")

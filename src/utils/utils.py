@@ -382,14 +382,11 @@ def index_3d(image, uv, max_val=0.1275, min_val=-0.1275):
 
 def index_2d(feat, uv):
     # https://zhuanlan.zhihu.com/p/137271718
-    # feat: [H, W]
+    # feat: [B, C, H, W]
     # uv: [B, N, 2]
-    # print("66666", feat.shape)
-    # feat = feat.unsqueeze(0)
-    # feat = feat.unsqueeze(0)
-    uv = uv.unsqueeze(0)  # [B, N, 1, 3]
+    uv = uv.unsqueeze(1)  # [B, 1, N, 2]
     feat = feat.transpose(2, 3)  # [W, H]
     samples = torch.nn.functional.grid_sample(
         feat, uv, align_corners=True
     )  # [B, C, N, 1]
-    return samples[:, :, 0, :]  # [B, C, N]
+    return samples.squeeze(-1)  # [B, C, N]
