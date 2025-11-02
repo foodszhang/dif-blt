@@ -168,3 +168,11 @@ def dice_coefficient(pred, target, threshold=0.5, eps=1e-8):
     # 3. 计算每个样本的Dice系数，再求批次平均
     dice_per_sample = (2.0 * intersection + eps) / (pred_sum + target_sum + eps)
     return dice_per_sample.mean()  # 返回批次平均Dice
+
+
+def compute_dice(pred_mask, gt_mask):
+    intersection = np.logical_and(pred_mask, gt_mask).sum()
+    union = pred_mask.sum() + gt_mask.sum()
+    if union == 0:
+        return 1.0  # 均无光源时视为完全匹配
+    return 2 * intersection / (union + 1e-8)

@@ -7,7 +7,7 @@ from src.loss import SparseLightLoss
 
 from src.network import get_network
 
-ckpt_dir = "./logs/unet/unet_density/2025_10_29_22_42_26/ckpt.tar"
+ckpt_dir = "./logs/unet/unet_density/2025_11_02_10_26_57/ckpt_best.tar"
 # ckpt_dir = "./one_source/ckpt.tar"
 device = "cuda"
 model = get_network("density", 7).to(device)
@@ -17,7 +17,7 @@ model.eval()
 # eval_dataset = Dataset("../mcx_simulation/one_source_val/", is_training=False)
 # eval_dataset = Dataset("../mcx_simulation/one_source_train/", is_training=False)
 eval_dataset = Dataset(
-    "../mcx_simulation/one_source_train/",
+    "../mcx_simulation/one_source_val/",
     "../mcx_simulation/preprocessed_blocks/",
     is_training=False,
 )

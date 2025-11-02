@@ -88,10 +88,10 @@ class MultiProjDataset(Dataset):
     def __len__(self):
         return self.total_num
         # return 800
-        if self.is_training:
-            return 20
-        else:
-            return 4
+        # if self.is_training:
+        #     return 20
+        # else:
+        #     return 4
 
     def __getitem__(self, index):
         block_idx = np.random.randint(len(self.block_files))
@@ -103,6 +103,7 @@ class MultiProjDataset(Dataset):
         coords = data["coords"]
         entry, entry_path = self.dirs[index]
         proj_path = os.path.join(entry_path, "proj.npz")
+        # proj_path = os.path.join(entry_path, "no_proj.npz")
         json_path = os.path.join(entry_path, f"{entry}.json")
         json_file = json.load(open(json_path))
         source_pos = json_file["Optode"]["Source"]["Pos"]
@@ -110,7 +111,11 @@ class MultiProjDataset(Dataset):
         source_data = np.fromfile(
             os.path.join(entry_path, source_pattern["Data"]), dtype=np.float32
         )
-        source_data = source_data.reshape(json_file["Optode"]["Source"]["Param1"])
+        source_shape = json_file["Optode"]["Source"]["Param1"]
+        source_data = source_data.reshape(
+            source_shape[2], source_shape[1], source_shape[0]
+        )
+        source_data = source_data.transpose(2, 1, 0)
         source_in_vol = np.zeros(self.origin_voxel_shape, dtype=np.float32)
         source_in_vol[
             source_pos[0] : source_pos[0] + source_data.shape[0],

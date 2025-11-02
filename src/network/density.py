@@ -30,14 +30,14 @@ class PointDensityNet(nn.Module):
         # 3. 光源密度预测头（针对稀疏光源）
         self.density_head = nn.Sequential(
             # nn.Linear(feature_dim + pos_enc_dim, feature_dim),
-            nn.Linear(feature_dim * 7, feature_dim * 7),
-            nn.BatchNorm1d(feature_dim * 7),
+            nn.Linear(feature_dim * 7, feature_dim),
+            nn.BatchNorm1d(feature_dim),
             nn.ReLU(inplace=True),
             # nn.Dropout(p=0.1),  # 抑制背景过拟合
-            nn.Linear(feature_dim * 7, feature_dim),
-            # nn.BatchNorm1d(feature_dim),
-            # nn.ReLU(inplace=True),
-            nn.Linear(feature_dim, 1),
+            nn.Linear(feature_dim, feature_dim // 2),
+            nn.BatchNorm1d(feature_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Linear(feature_dim // 2, 1),
             nn.Sigmoid(),  # 输出0-1的光源密度
         )
 

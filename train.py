@@ -58,7 +58,7 @@ class BasicTrainer(Trainer):
         Basic network trainer.
         """
         super().__init__(cfg, device)
-        self.loss_func = SparseLightLoss(pos_weight=200, sparse_weight=0.05)
+        self.loss_func = SparseLightLoss(pos_weight=500, sparse_weight=0.05)
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -132,7 +132,8 @@ class BasicTrainer(Trainer):
 
             density_pred = torch.cat(pred_list, dim=1)
             density_pred = density_pred.reshape(voxel_shape)
-            dice = dice_coefficient(density_pred, density_pred)
+
+            dice = dice_coefficient(density_pred, density)
 
             loss["total_dice"] += dice
 

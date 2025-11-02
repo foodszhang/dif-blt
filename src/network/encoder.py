@@ -5,7 +5,7 @@ from timm import create_model
 import numpy as np
 from .base import ProjectionConfig
 from src.utils.utils import index_2d
-from src.utils.cam import project_points_to_camera
+from src.utils.cam import project_points_to_camera, VolumeProjector
 
 
 class PointFeatureSampler:
@@ -26,17 +26,15 @@ class PointFeatureSampler:
         # 坐标转换
         voxel_shape = torch.asarray(voxel_shape, device=points.device)
         points = points * (voxel_shape - 1)
-        # test_point = torch.asarray([[[140, 110, 150]]], device=points.device)
-        # print("44444", test_point.shape)
-        # test_point = test_point - voxel_shape / 2.0 + 0.5
+        test_point = torch.asarray([[[90.5, 81.5, 110.5]]], device=points.device)
+        test_point = test_point - voxel_shape / 2.0 + 0.5
         points = points - voxel_shape / 2.0 + 0.5
         proj, dep = project_points_to_camera(
             points, int(view_name), camera_distance, detector_size
         )
-        # test_proj, _ = project_points_to_camera(
-        #     test_point, int(view_name), camera_distance, detector_size
-        # )
-        # print(f"555555 view_{view_name}", test_proj)
+        test_proj, _ = project_points_to_camera(
+            test_point, int(view_name), camera_distance, detector_size
+        )
 
         proj_coords = proj / torch.asarray(detector_size, device=points.device) * 2
 
@@ -256,7 +254,7 @@ class SpatialAttentionFusion(nn.Module):
             d_enc = torch.tensor(
                 d_index, dtype=torch.float32, device=x3d.device
             ).expand(B, N, 1)
-            # feat_map = feat_map.transpose(2, 3)
+            feat_map = feat_map.transpose(2, 3)
             local_feat = F.grid_sample(
                 feat_map,
                 grid,
