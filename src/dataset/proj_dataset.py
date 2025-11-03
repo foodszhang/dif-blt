@@ -112,6 +112,7 @@ class MultiProjDataset(Dataset):
         source_data = np.fromfile(
             os.path.join(entry_path, source_pattern["Data"]), dtype=np.float32
         )
+        print("55345345345", os.path.join(entry_path, source_pattern["Data"]))
         source_shape = json_file["Optode"]["Source"]["Param1"]
         source_data = source_data.reshape(
             source_shape[2], source_shape[1], source_shape[0]

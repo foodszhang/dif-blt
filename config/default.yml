@@ -1,5 +1,6 @@
 exp:
   expname: unet_density
+  #expdir: ./logs/unet/
   expdir: ./logs/unet/
   datadir: ../mcx_simulation/one_source_train
   # datadir: ../mcx_simulation/20251027/
@@ -11,7 +12,8 @@ exp:
 train:
   epoch: 2000
   n_batch: 1
-  lrate: 0.01
+  #lrate: 0.01
+  lrate: 0.0008669
   lrf: 0.005
   lrate_gamma: 0.1
   lrate_step: 1500

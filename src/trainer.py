@@ -70,10 +70,10 @@ class Trainer:
         # Log direcotry，设置实验路径和文件夹
         date_time = str(datetime.datetime.now())
         date_time = time2file_name(date_time)
-        self.expdir = osp.join(cfg["exp"]["expdir"], cfg["exp"]["expname"], date_time)
-        # self.expdir = osp.join(
-        #     cfg["exp"]["expdir"], cfg["exp"]["expname"], "2025_10_20_22_56_48"
-        # )
+        # self.expdir = osp.join(cfg["exp"]["expdir"], cfg["exp"]["expname"], date_time)
+        self.expdir = osp.join(
+            cfg["exp"]["expdir"], cfg["exp"]["expname"], "2025_11_03_00_24_34"
+        )
         self.ckptdir = osp.join(self.expdir, "ckpt.tar")
         self.ckptdir_backup = osp.join(self.expdir, "ckpt_backup.tar")
         self.ckpt_best_dir = osp.join(self.expdir, "ckpt_best.tar")
@@ -109,11 +109,21 @@ class Trainer:
             batch_size=4,
             # shuffle=True,
             shuffle=False,
-            # num_workers=4,
-            num_workers=0,
-            # persistent_workers=True,
-            # prefetch_factor=2,
+            num_workers=4,
+            # num_workers=0,
+            persistent_workers=True,
+            prefetch_factor=2,
         )
+        # self.train_dloader = DataLoader(
+        #     train_dataset,
+        #     batch_size=4,
+        #     # shuffle=True,
+        #     shuffle=False,
+        #     # num_workers=4,
+        #     num_workers=0,
+        #     # persistent_workers=True,
+        #     # prefetch_factor=2,
+        # )
         self.eval_dloader = DataLoader(
             val_dataset, batch_size=2, shuffle=False, num_workers=0
         )

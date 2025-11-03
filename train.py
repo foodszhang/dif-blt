@@ -98,6 +98,7 @@ class BasicTrainer(Trainer):
         #         torch.count_nonzero(density_pred > 0.5),
         #     )
 
+        self.loss_func.update_epoch(idx_epoch)
         loss = self.loss_func(view_projections, projections, density_pred, density)
         if (global_step + 1) % 10 == 0:
             tqdm.write(f"\nEpoch {idx_epoch} Summary:")
