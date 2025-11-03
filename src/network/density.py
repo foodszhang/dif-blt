@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .base import ProjectionConfig
-from .encoder import SpatialAttentionFusion, UNet
+from .encoder import SpatialAttentionFusion, UNet, GateFusion
 
 
 class PointDensityNet(nn.Module):
@@ -25,6 +25,9 @@ class PointDensityNet(nn.Module):
         # 2. 空间注意力融合模块
         self.attention_fusion = SpatialAttentionFusion(
             feature_dim=feature_dim, pos_enc_dim=pos_enc_dim
+        )
+        self.gate_fusions = nn.ModuleList(
+            [GateFusion(feature_dim) for _ in range(num_views)]
         )
 
         # 3. 光源密度预测头（针对稀疏光源）
@@ -52,6 +55,7 @@ class PointDensityNet(nn.Module):
         # 1. 提取多视图特征（每个视图独立处理）
         view_list = ["-90", "-60", "-30", "0", "30", "60", "90"]
         view_features = {}
+        views_no_projections = {}
         for view_name, projection in view_projections.items():
             ###TODO: HARD CODE， 认定了view_name的dx形式
             angle = view_name
@@ -59,6 +63,10 @@ class PointDensityNet(nn.Module):
             feat = self.view_extractors[view_list.index(str(angle))](projection)
             # feat = self.view_extractors(projection)
             view_features[view_name] = feat
+            views_no_projections[view_name] = self.gate_fusions[
+                view_list.index(str(angle))
+            ](feat)
+            views_no_projections[view_name] = views_no_projections[view_name].squeeze(1)
 
         # 2. 空间注意力融合
         # fused_feat, attn_weights, pos_enc = self.attention_fusion(
@@ -77,4 +85,4 @@ class PointDensityNet(nn.Module):
         # density = self.density_head(pos_enc).view(B, N, 1)
 
         # return density, attn_weights
-        return density, None
+        return density, views_no_projections

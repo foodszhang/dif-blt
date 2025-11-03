@@ -315,3 +315,45 @@ class SpatialAttentionFusion(nn.Module):
 
         # return fused_features, attention_weights, pos_enc
         return local_features
+
+
+class GateFusion(nn.Module):
+    """简化的门控融合模块：仅处理U-Net输出的单尺度特征图"""
+
+    def __init__(self, in_channels=64, out_channels=1):
+        super().__init__()
+        # 1. 通道门控：过滤噪声通道（保留光源相关的有效通道）
+        self.channel_gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),  # 全局池化获取通道特征
+            nn.Conv2d(in_channels, in_channels // 4, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(in_channels // 4, in_channels, kernel_size=1),
+            nn.Sigmoid(),  # 通道权重∈[0,1]，抑制噪声通道
+        )
+
+        # 2. 空间门控：增强光源等关键区域（抑制背景噪声）
+        self.spatial_gate = nn.Sequential(
+            nn.Conv2d(in_channels, 1, kernel_size=3, padding=1),  # 压缩至单通道
+            nn.Sigmoid(),  # 空间权重∈[0,1]，突出光源区域
+        )
+
+        # 3. 最终输出层
+        self.out_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, unet_feat):
+        """
+        Args:
+            unet_feat: 原始U-Net输出的单尺度特征图 [B, 64, H, W]
+        Returns:
+            output: 门控增强后的特征图/校正图 [B, out_channels, H, W]
+        """
+        # 1. 通道门控：抑制噪声通道
+        channel_weight = self.channel_gate(unet_feat)  # [B, 64, 1, 1]
+        feat = unet_feat * channel_weight  # [B, 64, H, W]
+
+        # 2. 空间门控：增强光源区域
+        spatial_weight = self.spatial_gate(feat)  # [B, 1, H, W]
+        feat = feat * spatial_weight  # [B, 64, H, W]
+
+        # 3. 输出结果
+        return self.out_conv(feat)

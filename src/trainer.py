@@ -109,9 +109,10 @@ class Trainer:
             batch_size=4,
             # shuffle=True,
             shuffle=False,
-            num_workers=4,
-            persistent_workers=True,
-            prefetch_factor=2,
+            # num_workers=4,
+            num_workers=0,
+            # persistent_workers=True,
+            # prefetch_factor=2,
         )
         self.eval_dloader = DataLoader(
             val_dataset, batch_size=2, shuffle=False, num_workers=0
@@ -208,7 +209,7 @@ class Trainer:
             if (
                 (idx_epoch % self.i_eval == 0 or idx_epoch == self.epochs)
                 and self.i_eval > 0
-                # and idx_epoch > 0
+                and idx_epoch > 0
             ):
                 self.net.eval()  # self.net 和 self.net_fine 分别表示粗细网络
                 with torch.no_grad():

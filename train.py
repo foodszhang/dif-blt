@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import argparse
 from torch.amp import autocast, GradScaler
+from tqdm import tqdm
 
 
 # torch.autograd.set_detect_anomaly(True)
@@ -37,7 +38,10 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 from src.configloading import load_config
 from src.trainer import Trainer
-from src.loss import calc_mse_loss, calc_combine_loss, SparseLightLoss, dice_coefficient
+from src.loss import (
+    ScatterLightLoss,
+    dice_coefficient,
+)
 from src.utils.utils import get_psnr, get_ssim, get_psnr_3d, get_ssim_3d, cast_to_image
 
 
@@ -58,7 +62,13 @@ class BasicTrainer(Trainer):
         Basic network trainer.
         """
         super().__init__(cfg, device)
-        self.loss_func = SparseLightLoss(pos_weight=500, sparse_weight=0.05)
+        self.loss_func = ScatterLightLoss(
+            1.0,
+            start_decay_epoch=1000,
+            decay_epochs=500,
+            pos_weight=500,
+            sparse_weight=0.05,
+        )
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -80,18 +90,25 @@ class BasicTrainer(Trainer):
         density = density.cuda()
         # print('555555', density, density_pred)
         # with autocast("cuda"):
-        density_pred, _ = self.net(projections, points)
+        density_pred, view_projections = self.net(projections, points)
+
         # if global_step % 10 == 0:
         #     print(
         #         torch.count_nonzero(density > 0.5),
         #         torch.count_nonzero(density_pred > 0.5),
         #     )
 
-        loss = self.loss_func(density_pred, density)
+        loss = self.loss_func(view_projections, projections, density_pred, density)
+        if (global_step + 1) % 10 == 0:
+            tqdm.write(f"\nEpoch {idx_epoch} Summary:")
+            tqdm.write(f"  Total Loss: {loss['total_loss']:.4f}")
+            tqdm.write(f"  Scatter Loss: {loss['scatter_loss']:.4f}")
+            tqdm.write(f"  Light Loss: {loss['light_loss']:.4f}")
+            tqdm.write(f"  Current Scatter Weight: {loss['scatter_weight']:.2f}")
         # loss += 10 * torch.mean((density - density_pred) ** 2)
         # print("44444", density_pred.max(), density_pred.min())
 
-        return loss
+        return loss["total_loss"]
 
     def eval_step(self, global_step, idx_epoch):
         """

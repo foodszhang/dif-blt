@@ -9,6 +9,7 @@ from src.network import get_network
 
 ckpt_dir = "./logs/unet/unet_density/2025_11_02_10_26_57/ckpt_best.tar"
 # ckpt_dir = "./one_source/ckpt.tar"
+ckpt_dir = "./one_source_no/ckpt_best.tar"
 device = "cuda"
 model = get_network("density", 7).to(device)
 ckpt = torch.load(ckpt_dir, weights_only=False)

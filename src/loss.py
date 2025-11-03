@@ -1,103 +1,116 @@
 import torch
 import numpy as np
 
-
-def calc_combine_loss(loss, x, y, k=1.0):
-    loss["loss_combine"] = combined_loss(x, y)
-    loss["loss"] += k * loss["loss_combine"]
-    return loss
-
-
-def calc_mse_loss(loss, x, y, k=1.0):
-    """
-    Calculate mse loss.
-    """
-    # Compute loss
-    loss_mse = torch.mean((x - y) ** 2)
-    loss["loss"] += k * loss_mse
-    loss["loss_mse"] = loss_mse
-    return loss
-
-
-def calc_mse_loss_raw(loss, x, y, k=1):
-    """
-    Calculate mse loss for raw.
-    """
-    # Compute loss for raw
-    loss_mse_raw = torch.mean((x - y) ** 2)
-    loss["loss"] += k * loss_mse_raw
-    loss["loss_mse_raw"] = loss_mse_raw
-    return loss
-
-
-def calc_tv_loss(loss, x, k):
-    """
-    Calculate total variation loss.
-    Args:
-        x (n1, n2, n3, 1): 3d density field.
-        k: relative weight
-    """
-    n1, n2, n3 = x.shape
-    tv_1 = torch.abs(x[1:, 1:, 1:] - x[:-1, 1:, 1:]).sum().type(torch.float32)
-    tv_2 = torch.abs(x[1:, 1:, 1:] - x[1:, :-1, 1:]).sum().type(torch.float32)
-    tv_3 = torch.abs(x[1:, 1:, 1:] - x[1:, 1:, :-1]).sum().type(torch.float32)
-    tv = (tv_1 + tv_2 + tv_3) / n1 / n2 / n3
-    loss["loss"] += tv * k
-    loss["loss_tv"] = tv * k
-    print("TV loss is inf", tv_1, tv_2, tv_3, n1, n2, n3, tv)
-    return loss
-
-
-def calc_tv_2d_loss(loss, x, k):
-    """
-    Anisotropic TV loss similar to the one in [1]_.
-
-    Parameters
-    ----------
-    x : :class:`torch.Tensor`
-        Tensor of which to compute the anisotropic TV w.r.t. its last two axes.
-
-    References
-    ----------
-    .. [1] https://en.wikipedia.org/wiki/Total_variation_denoising
-    """
-    dh = torch.abs(x[..., :, 1:] - x[..., :, :-1])
-    dw = torch.abs(x[..., 1:, :] - x[..., :-1, :])
-    tv = torch.sum(dh[..., :-1, :] + dw[..., :, :-1])
-    loss["loss"] += tv * k
-    loss["loss_tv"] = tv * k
-    return loss
-
-
-def compute_tv_norm(
-    values, losstype="l2", weighting=None
-):  # pylint: disable=g-doc-args
-    """Returns TV norm for input values.
-
-    Note: The weighting / masking term was necessary to avoid degenerate
-    solutions on GPU; only observed on individual DTU scenes.
-    """
-    v00 = values[:, :-1, :-1]
-    v01 = values[:, :-1, 1:]
-    v10 = values[:, 1:, :-1]
-
-    if losstype == "l2":
-        loss = ((v00 - v01) ** 2) + ((v00 - v10) ** 2)
-    elif losstype == "l1":
-        loss = np.abs(v00 - v01) + np.abs(v00 - v10)
-    else:
-        raise ValueError("Not supported losstype.")
-
-    if weighting is not None:
-        loss = loss * weighting
-    return loss
-
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from skimage.metrics import structural_similarity as ssim
 
 
+class ScatterLightLoss(nn.Module):
+    def __init__(
+        self,
+        # 散射校正损失参数
+        init_scatter_weight=1.0,  # 初始权重（训练初期）
+        target_scatter_weight=0.5,  # 目标权重（训练后期）
+        start_decay_epoch=200,  # 开始衰减的epoch
+        decay_epochs=100,  # 衰减持续epoch（200→300逐步衰减）
+        # SparseLightLoss参数
+        pos_weight=150.0,
+        sparse_weight=0.01,
+    ):
+        super().__init__()
+        self.init_scatter_weight = init_scatter_weight
+        self.target_scatter_weight = target_scatter_weight
+        self.start_decay_epoch = start_decay_epoch
+        self.decay_epochs = decay_epochs
+        self.current_epoch = 0  # 需外部传入当前epoch
+
+        # 初始化子损失
+        self.sparse_light_loss = SparseLightLoss(pos_weight, sparse_weight)
+        self.l1_loss = nn.L1Loss()
+
+    def update_epoch(self, epoch):
+        """训练循环中调用，更新当前epoch（用于权重调度）"""
+        self.current_epoch = epoch
+
+    def get_dynamic_scatter_weight(self):
+        """根据当前epoch计算动态散射校正权重"""
+        if self.current_epoch < self.start_decay_epoch:
+            # 训练初期：保持初始权重（优先校正）
+            return self.init_scatter_weight
+        elif self.current_epoch < self.start_decay_epoch + self.decay_epochs:
+            # 衰减阶段：线性降低权重
+            decay_ratio = (
+                self.current_epoch - self.start_decay_epoch
+            ) / self.decay_epochs
+            return self.init_scatter_weight - decay_ratio * (
+                self.init_scatter_weight - self.target_scatter_weight
+            )
+        else:
+            # 训练后期：保持目标权重（优先光源预测）
+            return self.target_scatter_weight
+
+    def scatter_correction_loss(self, pred_scatter: dict, gt_scatter: dict):
+        """散射校正损失（L1+SSIM）"""
+        total_scatter_loss = 0.0
+        for angle in pred_scatter.keys():
+            pred = pred_scatter[angle]
+            gt = gt_scatter[angle]
+
+            l1 = self.l1_loss(pred, gt)
+
+            # SSIM损失计算
+            pred_np = pred.detach().cpu().squeeze().numpy()
+            gt_np = gt.detach().cpu().squeeze().numpy()
+            ssim_total = 0.0
+            for b in range(pred_np.shape[0]):
+                ssim_val = ssim(pred_np[b], gt_np[b], data_range=1.0)
+                ssim_total += 1 - ssim_val
+            ssim_loss = torch.tensor(ssim_total / pred_np.shape[0], device=pred.device)
+
+            total_scatter_loss += l1 + ssim_loss
+        return total_scatter_loss / len(pred_scatter)
+
+    def forward(self, pred_scatter, gt_scatter, pred_density, gt_density):
+        # 1. 获取动态权重
+        scatter_weight = self.get_dynamic_scatter_weight()
+
+        # 2. 计算各部分损失
+        scatter_loss = self.scatter_correction_loss(pred_scatter, gt_scatter)
+        light_loss = self.sparse_light_loss(pred_density, gt_density)
+
+        # 3. 加权组合总损失
+        total_loss = scatter_weight * scatter_loss + light_loss
+
+        # 返回损失及当前权重（便于监控）
+        return {
+            "total_loss": total_loss,
+            "scatter_loss": scatter_loss,
+            "light_loss": light_loss,
+            "scatter_weight": scatter_weight,  # 监控权重变化
+        }
+
+
+# 复用原版SparseLightLoss
+class SparseLightLoss(nn.Module):
+    def __init__(self, pos_weight=150.0, sparse_weight=0.01, attn_weight=0.1):
+        super().__init__()
+        self.pos_weight = pos_weight
+        self.sparse_weight = sparse_weight
+        self.attn_weight = attn_weight
+
+    def forward(self, pred_density, gt_density):
+        bce_loss = F.binary_cross_entropy(
+            pred_density,
+            gt_density,
+            weight=gt_density * (self.pos_weight - 1) + 1,
+        )
+        sparse_loss = self.sparse_weight * torch.mean(torch.abs(pred_density))
+        return bce_loss + sparse_loss
+
+
+# 复用你的原版SparseLightLoss（未改动）
 class SparseLightLoss(nn.Module):
     """针对稀疏光源的损失函数（抑制背景，增强光源区域权重）"""
 
@@ -107,12 +120,10 @@ class SparseLightLoss(nn.Module):
         self.sparse_weight = sparse_weight  # 稀疏性约束权重
         self.attn_weight = attn_weight  # 注意力约束权重
 
-    # def forward(self, pred_density, gt_density, attn_weights):
     def forward(self, pred_density, gt_density):
         """
         pred_density: [B, N, 1] 预测密度
         gt_density: [B, N, 1] 真实密度（0=背景，1=光源）
-        attn_weights: [B, N, num_views] 注意力权重
         """
         # 1. 加权二元交叉熵（提升光源区域损失权重）
         bce_loss = F.binary_cross_entropy(
@@ -125,20 +136,7 @@ class SparseLightLoss(nn.Module):
         # 2. L1稀疏性约束（抑制背景区域的预测值）
         sparse_loss = self.sparse_weight * torch.mean(torch.abs(pred_density))
 
-        # 3. 注意力熵约束（光源点的注意力应更集中，熵更小）
-        # attn_entropy_loss = 0.0
-        # light_mask = (gt_density > 0.5).squeeze(-1)  # [B, N]，光源点掩码
-        # if light_mask.sum() > 0:
-        #     # 仅对光源点计算注意力熵
-        #     light_attn = attn_weights[light_mask]  # [K, num_views]，K为光源点数量
-        #     entropy = -torch.sum(
-        #         light_attn * torch.log(light_attn + 1e-8), dim=1
-        #     ).mean()
-        #     attn_entropy_loss = self.attn_weight * entropy
-
-        # total_loss = bce_loss + sparse_loss + attn_entropy_loss
         total_loss = bce_loss + sparse_loss
-        # total_loss = bce_loss
         return total_loss
 
 

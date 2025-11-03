@@ -103,7 +103,8 @@ class MultiProjDataset(Dataset):
         coords = data["coords"]
         entry, entry_path = self.dirs[index]
         proj_path = os.path.join(entry_path, "proj.npz")
-        # proj_path = os.path.join(entry_path, "no_proj.npz")
+        proj_path = os.path.join(entry_path, "no_proj.npz")
+        proj_no_path = os.path.join(entry_path, "no_proj.npz")
         json_path = os.path.join(entry_path, f"{entry}.json")
         json_file = json.load(open(json_path))
         source_pos = json_file["Optode"]["Source"]["Pos"]
@@ -126,11 +127,20 @@ class MultiProjDataset(Dataset):
         # source_in_vol = np.where(source_in_vol > 0.5, 1, 0)
 
         projection_zip = np.load(proj_path)
+        no_projection_zip = np.load(proj_no_path)
         # TODO: HARD CODE
         params = ["-90", "-60", "-30", "0", "30", "60", "90"]
         projections = {
             p: torch.tensor(
                 projection_zip[p] / 1e5,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            for p in params
+        }
+        no_projections = {
+            p: torch.tensor(
+                no_projection_zip[p] / 1e5,
                 dtype=torch.float32,
                 device=self.device,
             )
@@ -161,6 +171,7 @@ class MultiProjDataset(Dataset):
 
             return {
                 "projections": projections,
+                "no_projections": no_projections,
                 "points": points,
                 "point_densities": point_densities,
                 "total_num": np.count_nonzero(source_in_vol > 0.1),
@@ -184,6 +195,7 @@ class MultiProjDataset(Dataset):
             )
             return {
                 "projections": projections,
+                "no_projections": no_projections,
                 "points": points,
                 "point_densities": point_densities,
             }
