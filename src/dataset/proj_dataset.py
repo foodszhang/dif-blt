@@ -103,7 +103,7 @@ class MultiProjDataset(Dataset):
         coords = data["coords"]
         entry, entry_path = self.dirs[index]
         proj_path = os.path.join(entry_path, "proj.npz")
-        proj_path = os.path.join(entry_path, "no_proj.npz")
+        # proj_path = os.path.join(entry_path, "no_proj.npz")
         proj_no_path = os.path.join(entry_path, "no_proj.npz")
         json_path = os.path.join(entry_path, f"{entry}.json")
         json_file = json.load(open(json_path))
@@ -112,7 +112,6 @@ class MultiProjDataset(Dataset):
         source_data = np.fromfile(
             os.path.join(entry_path, source_pattern["Data"]), dtype=np.float32
         )
-        print("55345345345", os.path.join(entry_path, source_pattern["Data"]))
         source_shape = json_file["Optode"]["Source"]["Param1"]
         source_data = source_data.reshape(
             source_shape[2], source_shape[1], source_shape[0]

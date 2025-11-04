@@ -70,10 +70,10 @@ class Trainer:
         # Log direcotry，设置实验路径和文件夹
         date_time = str(datetime.datetime.now())
         date_time = time2file_name(date_time)
-        # self.expdir = osp.join(cfg["exp"]["expdir"], cfg["exp"]["expname"], date_time)
-        self.expdir = osp.join(
-            cfg["exp"]["expdir"], cfg["exp"]["expname"], "2025_11_03_00_24_34"
-        )
+        self.expdir = osp.join(cfg["exp"]["expdir"], cfg["exp"]["expname"], date_time)
+        # self.expdir = osp.join(
+        #     cfg["exp"]["expdir"], cfg["exp"]["expname"], "2025_11_03_00_24_34"
+        # )
         self.ckptdir = osp.join(self.expdir, "ckpt.tar")
         self.ckptdir_backup = osp.join(self.expdir, "ckpt_backup.tar")
         self.ckpt_best_dir = osp.join(self.expdir, "ckpt_best.tar")

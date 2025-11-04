@@ -2,10 +2,10 @@ exp:
   expname: unet_density
   #expdir: ./logs/unet/
   expdir: ./logs/unet/
-  datadir: ../mcx_simulation/one_source_train
+  datadir: ../mcx_simulation/two_source_train
   # datadir: ../mcx_simulation/20251027/
   #valdir: ../mcx_simulation/only_for_test/
-  valdir: ../mcx_simulation/one_source_val
+  valdir: ../mcx_simulation/two_source_val
   #datadir: ../mcx_simulation/20251021/
   #datadir: ../mcx_simulation/only_for_test/
   blockdir: ../mcx_simulation/preprocessed_blocks/
