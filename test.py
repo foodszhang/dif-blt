@@ -8,9 +8,10 @@ from src.loss import SparseLightLoss
 
 from src.network import get_network
 
-# ckpt_dir = "./logs/unet/unet_density/2025_11_03_00_24_34/ckpt_best.tar"
+ckpt_dir = "./logs/unet/unet_density/2025_11_03_23_54_58/ckpt_best.tar"
 # ckpt_dir = "./one_source/ckpt.tar"
-ckpt_dir = "./one_source/ckpt_best.tar"
+
+# ckpt_dir = "./one_source/ckpt_best.tar"
 device = "cuda"
 model = get_network("density", 7).to(device)
 ckpt = torch.load(ckpt_dir, weights_only=False)
@@ -20,7 +21,7 @@ model.eval()
 # eval_dataset = Dataset("../mcx_simulation/one_source_val/", is_training=False)
 # eval_dataset = Dataset("../mcx_simulation/one_source_train/", is_training=False)
 eval_dataset = Dataset(
-    "../mcx_simulation/one_source_val/",
+    "../mcx_simulation/two_source_val/",
     "../mcx_simulation/preprocessed_blocks/",
     is_training=False,
 )
